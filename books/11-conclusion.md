@@ -31,25 +31,38 @@ flowchart TB
     end
 
     subgraph Storage["Azure Storage"]
-        B[(Blob<br/>ファイル保存)]
-        Q[(Queue<br/>メッセージング)]
-        T[(Table<br/>ステータス管理)]
-        DLQ[(Poison Queue<br/>DLQ)]
+        B[(Blob)]
+        Q[(Queue)]
+        T[(Table)]
+        DLQ[(Poison Queue)]
     end
 
     subgraph Worker["Worker"]
         P[Processor]
     end
 
-    U -->|POST| EP
-    EP --> B
-    EP --> T
-    EP --> Q
-    Q --> P
-    P --> B
-    P --> T
-    P -.->|エラー時| DLQ
+    U -->|①POST| EP
+    EP -->|②ファイル保存| B
+    EP -->|③メタデータ登録| T
+    EP -->|④メッセージ投入| Q
+    Q -->|⑤ポーリング| P
+    P -->|⑥ファイル取得| B
+    P -->|⑦ステータス更新| T
+    P -.->|⑧エラー時| DLQ
 ```
+
+### 処理フローの詳細
+
+| ステップ | 処理内容       | 説明                                            |
+| -------- | -------------- | ----------------------------------------------- |
+| ①        | POST           | ユーザーがファイルをアップロード                |
+| ②        | ファイル保存   | Blob Storage にファイル実体を保存               |
+| ③        | メタデータ登録 | Table Storage に初期ステータス（pending）を登録 |
+| ④        | メッセージ投入 | Queue にファイル処理リクエストを投入            |
+| ⑤        | ポーリング     | Worker が Queue からメッセージを取得            |
+| ⑥        | ファイル取得   | Worker が Blob からファイルを取得して処理       |
+| ⑦        | ステータス更新 | Table Storage のステータスを completed に更新   |
+| ⑧        | エラー時       | 処理失敗時は Poison Queue（DLQ）に移動          |
 
 ---
 
