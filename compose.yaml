@@ -1,0 +1,210 @@
+# ============================================================
+# Docker Compose 設定ファイル（compose.yaml）
+# ============================================================
+#
+# 概要:
+#   Azurite Queue Tutorial の開発環境を定義します。
+#   3つのコンテナ（Azurite、API、Worker）で構成されます。
+#
+# 使用方法:
+#   起動: docker compose up
+#   停止: docker compose down
+#   ログ: docker compose logs -f
+#
+# 設計上の決定:
+#   - Docker Compose V2 形式（compose.yaml）を使用
+#   - ホットリロード対応（ボリュームマウント）
+#   - 企業プロキシ環境用の SSL 証明書設定をコメントで提供
+#
+# ============================================================
+
+# ============================================================
+# サービス定義
+# ============================================================
+services:
+  # ==========================================================
+  # Azurite（Azure Storage Emulator）
+  # ==========================================================
+  # Azure Storage のローカルエミュレーター。
+  # Blob、Queue、Table の3つのストレージサービスを提供します。
+  #
+  # 公式イメージ: mcr.microsoft.com/azure-storage/azurite
+  # ドキュメント: https://learn.microsoft.com/ja-jp/azure/storage/common/storage-use-azurite
+  #
+  azurite:
+    # Microsoft 公式の Azurite イメージ
+    # バージョンを固定して再現性を確保
+    image: mcr.microsoft.com/azure-storage/azurite:3.35.0
+
+    # コンテナ名を明示的に指定
+    # docker logs azurite でログを確認可能
+    container_name: azurite
+
+    # ポートマッピング
+    # ホスト:コンテナ の形式で指定
+    ports:
+      - "10000:10000"  # Blob Storage - ファイル保存用
+      - "10001:10001"  # Queue Storage - メッセージキュー用
+      - "10002:10002"  # Table Storage - メタデータ保存用
+
+    # Azurite 起動コマンド
+    # --blobHost/queueHost/tableHost 0.0.0.0: 全インターフェースでリッスン
+    # --loose: 厳密なバリデーションを緩和（開発用）
+    # --disableTelemetry: テレメトリ送信を無効化
+    # --skipApiVersionCheck: API バージョンチェックをスキップ
+    command: azurite --blobHost 0.0.0.0 --queueHost 0.0.0.0 --tableHost 0.0.0.0 --loose --disableTelemetry --skipApiVersionCheck
+
+    # 内部ネットワークに接続
+    networks:
+      - tutorial-network
+
+  # ==========================================================
+  # FastAPI（API Server）
+  # ==========================================================
+  # REST API サーバー。
+  # クライアントからのリクエストを受け付け、
+  # Blob/Table/Queue Storage と連携します。
+  #
+  # エンドポイント:
+  #   - POST /tasks: タスク作成
+  #   - POST /files/upload: ファイルアップロード
+  #   - GET /files/{id}: ファイル情報取得
+  #   - GET /files/{id}/status: ステータス確認
+  #   - GET /health: ヘルスチェック
+  #
+  api:
+    # ローカルの Dockerfile からビルド
+    build:
+      context: .              # ビルドコンテキスト（プロジェクトルート）
+      dockerfile: Dockerfile  # 使用する Dockerfile
+
+    # コンテナ名を明示的に指定
+    container_name: tutorial-api
+
+    # ポートマッピング
+    ports:
+      - "8000:8000"  # FastAPI デフォルトポート
+
+    # ボリュームマウント
+    volumes:
+      # コードのホットリロード用
+      # ホストのソースコードをコンテナにマウント
+      # 変更を即座に反映（uvicorn --reload と併用）
+      - .:/app
+
+      # 証明書ボリュームマウント（オプション：企業プロキシ環境用）
+      # 社内プロキシで SSL インスペクションが行われる環境では、
+      # カスタム CA 証明書のマウントが必要
+      # - ./cert/custom_ca.pem:/etc/ssl/certs/custom_ca.pem:ro
+
+    # 環境変数
+    environment:
+      # 実行環境名
+      - ENV=local
+
+      # Azurite 接続文字列
+      # ----------------------------------------
+      # Docker 内部ネットワークでは "azurite" ホスト名を使用
+      # （localhost ではなく、コンテナ名で接続）
+      #
+      # 接続文字列の構成:
+      # - DefaultEndpointsProtocol=http（Azurite は HTTP を使用）
+      # - AccountName=devstoreaccount1（Azurite デフォルト）
+      # - AccountKey=Eby8vdM02x...（Azurite デフォルトキー）
+      # - BlobEndpoint/QueueEndpoint/TableEndpoint（各サービスのエンドポイント）
+      - STORAGE_CONNECTION_STRING=DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://azurite:10000/devstoreaccount1;QueueEndpoint=http://azurite:10001/devstoreaccount1;TableEndpoint=http://azurite:10002/devstoreaccount1;
+
+      # SSL 証明書（オプション：企業プロキシ環境用）
+      # Python の requests / Azure SDK が使用する CA バンドルを指定
+      # - REQUESTS_CA_BUNDLE=/etc/ssl/certs/custom_ca.pem
+      # - SSL_CERT_FILE=/etc/ssl/certs/custom_ca.pem
+
+    # 依存関係
+    # Azurite が起動してから API を起動
+    depends_on:
+      - azurite
+
+    # 起動コマンド
+    # uvicorn: ASGI サーバー
+    # --host 0.0.0.0: 全インターフェースでリッスン（コンテナ外からアクセス可能）
+    # --port 8000: リッスンポート
+    # --reload: ホットリロード有効（ファイル変更時に自動再起動）
+    # --log-level debug: 詳細ログ出力
+    command: uvicorn apps.api.app.main:app --host 0.0.0.0 --port 8000 --reload --log-level debug
+
+    # 内部ネットワークに接続
+    networks:
+      - tutorial-network
+
+  # ==========================================================
+  # Worker（Queue Consumer）
+  # ==========================================================
+  # キューからメッセージを取得して処理するワーカープロセス。
+  # ポーリングループで継続的にキューを監視します。
+  #
+  # 処理フロー:
+  #   1. Queue からメッセージを取得（dequeue）
+  #   2. プロセッサーでメッセージを処理
+  #   3. 成功時：メッセージを削除
+  #   4. 失敗時：リトライまたは DLQ に移動
+  #
+  worker:
+    # ローカルの Dockerfile からビルド
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    # コンテナ名を明示的に指定
+    container_name: tutorial-worker
+
+    # ポートマッピング
+    # Worker は通常 API を公開しないが、
+    # ヘルスチェック用にポートを開放
+    ports:
+      - "8001:8000"  # ヘルスチェック用（将来の拡張）
+
+    # ボリュームマウント
+    volumes:
+      # コードのホットリロード用
+      - .:/app
+      # 設定ファイルを読み取り専用でマウント
+      # config/queues.yaml を Worker が参照
+      - ./config:/app/config:ro
+
+      # 証明書ボリュームマウント（オプション：企業プロキシ環境用）
+      # - ./cert/custom_ca.pem:/etc/ssl/certs/custom_ca.pem:ro
+
+    # 環境変数（API と同じ接続文字列を使用）
+    environment:
+      - ENV=local
+      # Azurite 接続文字列
+      - STORAGE_CONNECTION_STRING=DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://azurite:10000/devstoreaccount1;QueueEndpoint=http://azurite:10001/devstoreaccount1;TableEndpoint=http://azurite:10002/devstoreaccount1;
+
+      # SSL 証明書（オプション：企業プロキシ環境用）
+      # - REQUESTS_CA_BUNDLE=/etc/ssl/certs/custom_ca.pem
+      # - SSL_CERT_FILE=/etc/ssl/certs/custom_ca.pem
+
+    # 依存関係
+    depends_on:
+      - azurite
+
+    # 起動コマンド
+    # Worker スクリプトを直接実行
+    # uvicorn は使用しない（Worker は HTTP サーバーではない）
+    command: python apps/worker/app/worker.py
+
+    # 内部ネットワークに接続
+    networks:
+      - tutorial-network
+
+# ============================================================
+# ネットワーク定義
+# ============================================================
+# カスタムブリッジネットワークを作成。
+# コンテナ間はコンテナ名で通信可能（例: http://azurite:10001）
+#
+networks:
+  tutorial-network:
+    # ブリッジドライバー（デフォルト）
+    # 同一ホスト上のコンテナ間通信用
+    driver: bridge
